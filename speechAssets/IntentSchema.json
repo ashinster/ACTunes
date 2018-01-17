@@ -1,0 +1,51 @@
+{
+  "languageModel": {
+    "intents": [
+      {
+        "name": "AMAZON.CancelIntent",
+        "samples": [
+          "cancel",
+          "never mind"
+        ]
+      },
+      {
+        "name": "AMAZON.HelpIntent",
+        "samples": [
+          "help",
+          "what song",
+          "what tune",
+          "song name",
+          "what is",
+          "what even"
+        ]
+      },
+      {
+        "name": "AMAZON.PauseIntent",
+        "samples": [
+          "pause",
+          "hold up",
+          "chill",
+          "be quiet"
+        ]
+      },
+      {
+        "name": "AMAZON.ResumeIntent",
+        "samples": [
+          "resume",
+          "start",
+          "play",
+          "you good"
+        ]
+      },
+      {
+        "name": "AMAZON.StopIntent",
+        "samples": [
+          "stop",
+          "shut up",
+          "exit"
+        ]
+      }
+    ],
+    "invocationName": "a.c. tunes"
+  }
+}
