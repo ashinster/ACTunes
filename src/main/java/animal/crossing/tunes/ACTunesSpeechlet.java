@@ -19,5 +19,25 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-public class ACTunesSpeechlet  {
+public class ACTunesSpeechlet implements SpeechletV2 {
+
+    @Override
+    public void onSessionStarted(SpeechletRequestEnvelope<SessionStartedRequest> speechletRequestEnvelope) {
+
+    }
+
+    @Override
+    public SpeechletResponse onLaunch(SpeechletRequestEnvelope<LaunchRequest> speechletRequestEnvelope) {
+        return null;
+    }
+
+    @Override
+    public SpeechletResponse onIntent(SpeechletRequestEnvelope<IntentRequest> speechletRequestEnvelope) {
+        return null;
+    }
+
+    @Override
+    public void onSessionEnded(SpeechletRequestEnvelope<SessionEndedRequest> speechletRequestEnvelope) {
+
+    }
 }

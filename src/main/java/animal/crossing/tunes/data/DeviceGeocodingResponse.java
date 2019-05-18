@@ -2,7 +2,7 @@ package animal.crossing.tunes.data;
 
 import java.util.List;
 
-public class DeviceGeocodingResponse implements GoogleData {
+public class DeviceGeocodingResponse extends GoogleData {
     public List<Result> results;
     public String status;
     public String error_message;

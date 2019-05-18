@@ -2,21 +2,22 @@ package animal.crossing.tunes;
 
 import animal.crossing.tunes.data.DeviceAddress;
 import animal.crossing.tunes.service.AlexaDeviceAddressClient;
+import animal.crossing.tunes.service.DbOffsetClient;
 import animal.crossing.tunes.service.GoogleMapsClient;
 import com.amazon.speech.json.SpeechletRequestEnvelope;
 import com.amazon.speech.slu.Intent;
 import com.amazon.speech.speechlet.*;
 import com.amazon.speech.speechlet.interfaces.audioplayer.AudioPlayer;
-import com.amazon.speech.speechlet.interfaces.audioplayer.directive.StopDirective;
+import com.amazon.speech.speechlet.interfaces.audioplayer.ClearBehavior;
+import com.amazon.speech.speechlet.interfaces.audioplayer.directive.ClearQueueDirective;
 import com.amazon.speech.speechlet.interfaces.audioplayer.request.*;
 import com.amazon.speech.speechlet.interfaces.system.SystemInterface;
 import com.amazon.speech.speechlet.interfaces.system.SystemState;
 import com.amazon.speech.ui.*;
-import com.google.gson.JsonSyntaxException;
+import com.amazonaws.services.dynamodbv2.document.Item;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.util.*;
 
 public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
@@ -25,8 +26,6 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
     private String currentSong;
     private String deviceTimeOffset;
 
-    private boolean isLaunch = false;
-
     @Override
     public SpeechletResponse onPlaybackFailed(SpeechletRequestEnvelope<PlaybackFailedRequest> speechletRequestEnvelope) {
         log.error("Inside onPlaybackFailed() | {} - {} ",
@@ -34,6 +33,8 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
                 speechletRequestEnvelope.getRequest().getError().getType().toString());
 
         PlaybackFailedRequest intentRequest = speechletRequestEnvelope.getRequest();
+        SystemState systemState = getSystemState(speechletRequestEnvelope.getContext());
+        this.currentSong = intentRequest.getToken();
 
         return null;
     }
@@ -43,6 +44,9 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
         log.info("Inside onPlaybackFinished()");
 
         PlaybackFinishedRequest intentRequest = speechletRequestEnvelope.getRequest();
+        SystemState systemState = getSystemState(speechletRequestEnvelope.getContext());
+        this.currentSong = intentRequest.getToken();
+        Date date = intentRequest.getTimestamp();
 
         return null;
     }
@@ -50,14 +54,13 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
     @Override
     public SpeechletResponse onPlaybackNearlyFinished(SpeechletRequestEnvelope<PlaybackNearlyFinishedRequest> speechletRequestEnvelope) {
         log.info("Inside onPlaybackNearlyFinished()");
+
         PlaybackNearlyFinishedRequest intentRequest = speechletRequestEnvelope.getRequest();
-
         SystemState systemState = getSystemState(speechletRequestEnvelope.getContext());
-
-        TunesUtil.token = intentRequest.getToken();
-
+        this.currentSong = intentRequest.getToken();
         Date date = intentRequest.getTimestamp();
-        return getPlayAudioResponse(systemState, date, true);
+
+        return getPlayAudioResponse(systemState, date);
     }
 
     @Override
@@ -65,18 +68,23 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
         log.info("Inside onPlaybackStarted()");
 
         PlaybackStartedRequest intentRequest = speechletRequestEnvelope.getRequest();
-
         SystemState systemState = getSystemState(speechletRequestEnvelope.getContext());
-
-        TunesUtil.token = intentRequest.getToken();
-
+        this.currentSong = intentRequest.getToken();
         Date date = intentRequest.getTimestamp();
-        return getPlayAudioResponse(systemState, date, false);
+
+        log.info("Now playing: {}, offset from beginning of stream: {}", this.currentSong, intentRequest.getOffsetInMilliseconds());
+
+        return null;
     }
 
     @Override
     public SpeechletResponse onPlaybackStopped(SpeechletRequestEnvelope<PlaybackStoppedRequest> speechletRequestEnvelope) {
         log.info("Inside onPlaybackStopped()");
+
+        PlaybackStoppedRequest intentRequest = speechletRequestEnvelope.getRequest();
+        this.currentSong = intentRequest.getToken();
+
+        log.info("Stopped: {}, offset from beginning of stream: {}", this.currentSong, intentRequest.getOffsetInMilliseconds());
 
         return null;
     }
@@ -117,11 +125,13 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
         if(systemState.getUser().getPermissions() == null){
             // Ask the user for permissions in the Alexa app
             log.info("The user hasn't authorized the skill. Sending a permissions card.");
-            return getAskPermissionsResponse();
+            return createAskPermissionsResponse();
         }
 
-        this.isLaunch = true;
-        return getPlayAudioResponse(systemState, date, false);
+        SpeechletResponse returnResponse = getPlayAudioResponse(systemState, date);
+        log.info("Exiting onLaunch()");
+        //return TunesUtil.getSilence();
+        return returnResponse;
     }
 
     @Override
@@ -139,103 +149,134 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
 
         Date date = request.getTimestamp();
 
+        SpeechletResponse returnResponse;
         if("AMAZON.HelpIntent".equals(intentName)){
-            return getHelpResponse();
+            returnResponse = createHelpResponse();
         } else if("AMAZON.StopIntent".equals(intentName) || "AMAZON.PauseIntent".equals(intentName) || "AMAZON.CancelIntent".equals(intentName)){
-            return getStopResponse();
+            log.info("Returning Stop Directive");
+            returnResponse = createStopResponse();
         } else if("AMAZON.ResumeIntent".equals(intentName)){
-            return getPlayAudioResponse(getSystemState(speechletRequestEnvelope.getContext()), date, false);
+            returnResponse = getPlayAudioResponse(getSystemState(speechletRequestEnvelope.getContext()), date);
         }else {
-            return getPlayAudioResponse(getSystemState(speechletRequestEnvelope.getContext()), date, false);
+            returnResponse = getPlayAudioResponse(getSystemState(speechletRequestEnvelope.getContext()), date);
         }
+
+        log.info("Exiting onIntent() - {}", intentName);
+        return returnResponse;
     }
 
-    private SpeechletResponse getStopResponse(){
+    private SpeechletResponse createStopResponse(){
         SpeechletResponse stopResponse = new SpeechletResponse();
         List<Directive> stopDirective = new ArrayList<>();
-        stopDirective.add(new StopDirective());
+        ClearQueueDirective clearQueueDirective = new ClearQueueDirective();
+        clearQueueDirective.setClearBehavior(ClearBehavior.CLEAR_ALL);
+        stopDirective.add(clearQueueDirective);
+        //stopDirective.add(new StopDirective());
         stopResponse.setDirectives(stopDirective);
         stopResponse.setNullableShouldEndSession(true);
         return stopResponse;
     }
 
-    private SpeechletResponse getPlayAudioResponse(SystemState systemState, Date requestDate, boolean playFromBeginning){
+    private SpeechletResponse getPlayAudioResponse(SystemState systemState, Date requestDate){
 
-        SpeechletResponse speechletResponse;
+        // Get the timestamp of the request in milliseconds
+        long requestTimestamp = requestDate.getTime();
+
+        // Debug values
+        String debugTime = System.getenv("DEBUG_TIME");
+        if(debugTime != null && !debugTime.isEmpty()){
+            requestTimestamp = Long.parseLong(debugTime);
+        }
+
+        // The default tunes builder which uses the request's UTC date
+        TunesUtil.TunesBuilder tunesBuilder = new TunesUtil.TunesBuilder(requestTimestamp);
+
+        // If we have the offset cached then use it. Also check the db for offset
         if(this.deviceTimeOffset != null){
-            log.info("using cached local device time offset.");
+            log.info("Using cached local device time offset.");
             long localOffset = Long.valueOf(this.deviceTimeOffset);
-            speechletResponse = TunesUtil.getTune(new Date(requestDate.getTime() + localOffset), playFromBeginning);
-        }else{
-            try {
-                long localOffset = getDeviceTimeOffset(systemState, requestDate.getTime());
-                log.info("getPlayAudioResponse received date: {} ms, calculated local time offset as: {} ms", requestDate.getTime(), localOffset);
-                speechletResponse = TunesUtil.getTune(new Date(requestDate.getTime() + localOffset), playFromBeginning);
-            } catch (Exception e) {
-                log.error("Error trying to determine device's local time. Defaulting to UTC time.", e);
-                speechletResponse = TunesUtil.getTune(requestDate, false);
-                speechletResponse.setOutputSpeech(getPlainTextOutputSpeech("Error getting device local time. Using default time."));
+            return tunesBuilder.date(requestTimestamp, localOffset).build().getTune();
+        } else{
+            log.info("Checking database for the device's offset.");
+
+            // Check the db to see if the device ID is associated with an offset
+            DbOffsetClient dbClient = new DbOffsetClient();
+            Item item = dbClient.retrieveItem(systemState.getDevice().getDeviceId());
+
+            if(item != null){
+                log.info("Device ID found in database");
+                long localOffset = item.getLong(DbOffsetClient.OFFSET_KEY);
+                return tunesBuilder.date(requestTimestamp, localOffset).build().getTune();
+            }else{
+                log.info("Device ID not found in database.");
             }
         }
-        this.isLaunch = false;
-        return speechletResponse;
+
+        // We know that the offset isn't cached at this point so we need to figure out what it is
+        long localOffset = getDeviceTimeOffset(systemState, requestTimestamp);
+        this.deviceTimeOffset = String.valueOf(localOffset);
+
+        // Add the association between device ID and local offset since we now have it
+        log.info("Associating device ID with its local offset.");
+        DbOffsetClient dbClient = new DbOffsetClient();
+        dbClient.associateOffset(systemState.getDevice().getDeviceId(), localOffset);
+
+        // The device's local time is the sum of the time zone offset and the UTC time
+        return tunesBuilder.date(requestTimestamp, localOffset).build().getTune();
     }
 
-    private long getDeviceTimeOffset(SystemState systemState, long requestDate) throws IOException, JsonSyntaxException {
-        long local = 0;
+    /**
+     * Method which will call various services to determine the local time offset of the device's location.
+     * @param systemState Used to retrieve the necessary data to call Amazon's webservice to get device's address
+     * @param requestDate The UTC timestamp in milliseconds of the request
+     * @return Returns the local offset of the device's location used to calculate the device's local time.
+     */
+    private long getDeviceTimeOffset(SystemState systemState, long requestDate) {
+        long localOffset = 0;
 
+        // Data needed to call Amazon address webservice
         String deviceId = systemState.getDevice().getDeviceId();
         String accessToken = systemState.getApiAccessToken();
         String apiEndpoint = systemState.getApiEndpoint();
 
-        String addressString = getDeviceLocation(deviceId, accessToken, apiEndpoint);
+        // Call Amazon's address API for the device
+        String addressString = getDeviceAddressAsString(deviceId, accessToken, apiEndpoint);
+
         if(addressString != null) {
             GoogleMapsClient googleClient = new GoogleMapsClient();
-            try {
-                local = googleClient.getDeviceTime(addressString, requestDate);
-                this.deviceTimeOffset = String.valueOf(local);
-            } catch (IOException e) {
-                log.error("SOmethings a BROKE!!!1", e);
-                throw e;
-            } catch (JsonSyntaxException e) {
-                log.error("Error when deserialzing JSON string to POJO", e);
-                throw e;
-            }
+            localOffset = googleClient.getDeviceLocalOffset(addressString, requestDate);
         }
-        return local;
+
+        return localOffset;
     }
 
     /**
      * Method to call the Alexa API to get the location of the Alexa device.
      * All parameters are from the request's SystemState
-     * @param accessToken The API access token
      * @param deviceId The device ID
+     * @param accessToken The API access token
      * @param apiEndpoint The API endpoint value
      * @return A concatenated String of the device's address to use for the Google Maps API.
      * Or null if there was a permissions issue or an unexpected error.
      */
-    private String getDeviceLocation(String deviceId, String accessToken, String apiEndpoint){
+    private String getDeviceAddressAsString(String deviceId, String accessToken, String apiEndpoint){
+        String addressString = null;
+
         AlexaDeviceAddressClient addressClient
                 = new AlexaDeviceAddressClient(deviceId, accessToken, apiEndpoint);
 
-        DeviceAddress deviceAddress = null;
-        try {
-            deviceAddress = addressClient.getAddress();
-        } catch (IOException e) {
-            log.info("Exception when trying to get device address.", e);
-        }
+        DeviceAddress deviceAddress = addressClient.getAddress();
 
-        String addressString = null;
         if(deviceAddress != null){
-            addressString = deviceAddress.countryCode + "," + deviceAddress.postalCode;;
+            // Note that we are URL encoding a comma here
+            addressString = deviceAddress.countryCode + "%2C" + deviceAddress.postalCode;
         }
 
         return addressString;
     }
 
     private SystemState getSystemState(Context context) {
-        SystemState systemState = context.getState(SystemInterface.class, SystemState.class);
-        return systemState;
+        return context.getState(SystemInterface.class, SystemState.class);
     }
 
     /**
@@ -243,11 +284,8 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
      *
      * @return SpeechletResponse spoken and visual response for the given intent
      */
-    private SpeechletResponse getAskPermissionsResponse(){
+    private SpeechletResponse createAskPermissionsResponse(){
         String speechText = "Please configure permissions in the Alexa app so A.C. Tunes can play music based on your local timezone.";
-        String cardText = "Please configure your permissions so A.C. Tunes can play you the correct tune based on your local timezone. " +
-                "If you decide not to configure these settings, A.C. Tunes will use the Coordinated Universal Time (UTC) " +
-                "to determine what tune to play.";
 
         PlainTextOutputSpeech speech =  new PlainTextOutputSpeech();
         speech.setText(speechText);
@@ -279,50 +317,15 @@ public class ACTunesPlayer implements AudioPlayer, SpeechletV2 {
      *
      * @return SpeechletResponse spoken and visual response for the given intent
      */
-    private SpeechletResponse getHelpResponse() {
+    private SpeechletResponse createHelpResponse() {
         String speechText = "Unable to get song title";
         if(this.currentSong != null){
-            speechText = this.currentSong.split("|",2)[0];
+            speechText = this.currentSong.split("\\|",2)[0];
         }
 
         // Create the plain text output
         PlainTextOutputSpeech speech = getPlainTextOutputSpeech(speechText);
 
         return SpeechletResponse.newTellResponse(speech);
-    }
-
-    private SpeechletResponse getErrorResponse(String errorMsg){
-        // Create the plain text output
-        PlainTextOutputSpeech speech = getPlainTextOutputSpeech(errorMsg);
-
-        return SpeechletResponse.newTellResponse(speech);
-    }
-
-
-    /**
-     * Helper method for retrieving an Ask response with a simple card and reprompt included.
-     * @param cardTitle Title of the card that you want displayed.
-     * @param speechText speech text that will be spoken to the user.
-     * @return the resulting card and speech text.
-     */
-    private SpeechletResponse getAskResponse(String cardTitle, String speechText) {
-        SimpleCard card = TunesUtil.getSimpleCard(cardTitle, speechText);
-        PlainTextOutputSpeech speech = getPlainTextOutputSpeech(speechText);
-        Reprompt reprompt = getReprompt(speech);
-
-        return SpeechletResponse.newTellResponse(speech, card);
-    }
-
-    /**
-     * Helper method that returns a reprompt object. This is used in Ask responses where you want
-     * the user to be able to respond to your speech.
-     * @param outputSpeech The OutputSpeech object that will be said once and repeated if necessary.
-     * @return Reprompt instance.
-     */
-    private Reprompt getReprompt(OutputSpeech outputSpeech) {
-        Reprompt reprompt = new Reprompt();
-        reprompt.setOutputSpeech(outputSpeech);
-
-        return reprompt;
     }
 }
